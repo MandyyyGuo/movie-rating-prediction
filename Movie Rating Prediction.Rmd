@@ -1,0 +1,440 @@
+---
+title: "HW2 Write-up"
+author: "Mandy Guo 48340673, Xiaoyu Ji 48639648, \nYiqing Sha 44691573, Qian Zhao
+  48666701"
+date: "11/25/2021"
+output:
+  pdf_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Introdiction
+
+In this report, we aim to tease apart what factors contribute to the classification of "good" and "bad" movies based on their ratings. The variables we use for our prediction includes (director, gender of the director, cast, budget and revenue). Understanding the relationship between movie quality and contributing factors can help production companies to predict movie ratings and maximize a movie's chance of success during the creation phase.
+
+To conduct the analysis, we utilized the metadata and credits dataset. There are 45,186 observations in the metadata including characteristics such as budget, genre, revenue, vote of the movies. For the credits dataset, there are 45,476 observations including the cast and crew JSON columns of the movies. We have a relatively large dataset and only small portions of null values. We dropped some columns before joining the data for generating the logistic regression model to give our data simplicity and clarity.
+
+### Cast and Directors
+
+To get cast and crew information for analysis, we parsed them from the credits dataset. We eliminated our cast variable to only the top two actors in each movie. We also include the director and director_gender variables in our model. To include these variables in our analysis, we defined top cast as the actors / actress who appears in more than 10 movies in the dataset. Similarly, we defined top director as the ones who produced more than 5 movies in the dataset. 2 Dummy variables are created indicating the presence of top cast and top directors.
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+suppressMessages(library(ggplot2))
+suppressMessages(library(dplyr))
+suppressMessages(library(tidyverse))
+suppressMessages(library(tidyr))
+suppressMessages(library(tidytext))
+#suppressMessages(library(scales))
+#suppressMessages(library(knitr))
+#suppressMessages(library(gridExtra))
+#suppressMessages(library(lubridate))
+#suppressMessages(library(epiDisplay))
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+#Importing data 
+metadata <- data.frame(read.csv("C:/Users/mandy/Documents/MSBA/Fall MOD B/MAST6251 Applied Predictive Analytics/HW2/movies_metadata.csv",stringsAsFactors = FALSE))
+credits<-read.csv("C:/Users/mandy/Documents/MSBA/Fall MOD B/MAST6251 Applied Predictive Analytics/HW2/credits.csv",stringsAsFactors = FALSE)
+
+metadata<- na.omit(metadata)
+credits<- na.omit(credits)
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+drop_df<-c("adult", "homepage",  "poster_path", "overview", "tagline",  "video")
+metadata = dplyr::select(metadata, -all_of(drop_df))
+
+#glimpse(metadata)
+#summary(metadata)
+```
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+metadata$popularity <- as.numeric(metadata$popularity)
+metadata$budget <- as.numeric(metadata$budget)
+#sapply(metadata, class)
+#summary(metadata)
+```
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+metadata<-distinct(metadata)
+#glimpse(metadata)
+#glimpse(credits)
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+metadata$release_date <-as.Date(metadata$release_date)
+
+#add new column 'year'
+date <- as.POSIXct(metadata$release_date, format = "%Y-%m-%d")
+metadata$year <- format(date, format="%Y")
+metadata$year <- as.integer(metadata$year)
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+metadata$id<-as.integer(metadata$id)
+credits$id<-as.integer(credits$id)
+movies_credits <- merge(metadata,credits,by="id")
+#glimpse(movies_credits)
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+#ugly code, but much faster than fromJSON
+parse_cast <- function(cast_text) {
+  text <- 
+    sub("\\?\\$\\?", "",    #drop the first one
+        gsub("\'|\"|\\[|\\]|\\{|\\}|,", "",
+             gsub("\'cast_id\':|\'character\':|\'credit_id\':|\'gender\':|\'id\':|\'name\':|\'order\':|\'profile_path\':", 
+                  "?$?", 
+                  cast_text)
+        )
+    )
+  
+  data <- data.frame(matrix(
+    trimws(unlist(
+      strsplit(text, "\\?\\$\\?")
+    )), 
+    ncol = 8, byrow = TRUE), stringsAsFactors = FALSE)
+  
+  names(data) <- c("cast_id", "character", "credit_id", "gender", "id", "cast_name", "order", "profile_path")
+  data$order <- as.numeric(data$order)
+  
+  return(data %>% select(cast_id, gender, id, cast_name, order))
+}
+
+num_batches <- 50
+batch_interval <- ceiling(nrow(credits) / num_batches)
+batch_brackets <- 0:num_batches * batch_interval
+batch_brackets[num_batches+1] <- nrow(credits)
+batch_brackets[1] <- 1
+
+cast_data <- data.frame()
+for(b_i in 1:num_batches){
+  
+  batch_data <- data.frame()
+  for(b2_i in batch_brackets[b_i]:(batch_brackets[b_i+1]-1)){
+    #print(b2_i)
+    this_cast <- parse_cast(credits$cast[b2_i])
+    if(nrow(this_cast) > 0){
+      this_cast$movie_id <- as.character(credits$id[b2_i])
+      batch_data <- rbind(batch_data, this_cast)
+    }
+  }
+  cast_data <- rbind(cast_data, batch_data)
+  #print(paste0("    done batch ", b_i))
+}
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+#Each movie has multiple casts listed, we only choose the top 2 casts to conduct the analysis
+cast_data <- subset(cast_data, order %in% c(0, 1))
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+parse_crew <- function(crew_text) {
+  text <- 
+    sub("\\?\\$\\?", "",    #drop the first one
+        gsub("\'|\"|\\[|\\]|\\{|\\}|,", "",
+             gsub("\'credit_id\':|\'department\':|\'gender\':|\'id\':|\'job\':|\'name\':|\'profile_path\':", 
+                  "?$?", 
+                  crew_text)
+        )
+    )
+  
+  data <- data.frame(matrix(
+    trimws(unlist(
+      strsplit(text, "\\?\\$\\?")
+    )), 
+    ncol = 7, byrow = TRUE), stringsAsFactors = FALSE)
+  
+  names(data) <- c("credit_id", "department", "gender", "id", "job", "crew_name", "profile_path")
+  
+  return(data %>% select(credit_id, department, gender, id, job, crew_name))
+}
+
+num_batches <- 50
+batch_interval <- ceiling(nrow(credits) / num_batches)
+batch_brackets <- 0:num_batches * batch_interval
+batch_brackets[num_batches+1] <- nrow(credits)
+batch_brackets[1] <- 1
+
+crew_data <- data.frame()
+for(b_i in 1:num_batches){
+  
+  batch_data <- data.frame()
+  for(b2_i in batch_brackets[b_i]:(batch_brackets[b_i+1]-1)){
+    #print(b2_i)
+    this_crew <- parse_crew(credits$crew[b2_i])
+    if(nrow(this_crew) > 0){
+      this_crew$movie_id <- as.character(credits$id[b2_i])
+      batch_data <- rbind(batch_data, this_crew)
+    }
+  }
+  crew_data <- rbind(crew_data, batch_data)
+  #print(paste0("    done batch ", b_i))
+}
+
+crew_data_directors <- crew_data[crew_data$job == 'Director', ]
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+c<-mean(movies_credits$vote_average)
+c<-as.numeric(c)
+m <- data.frame(lapply(movies_credits[c("vote_count")], 
+  function(x) {
+    quantile(x, probs = c(0.75), na.rm = TRUE) }))
+m <- as.numeric(m)
+
+v=movies_credits$vote_count
+r=movies_credits$vote_average
+
+weighted_rating= (v/(v+m) * r) + (m/(m+v) * c)
+#weighted_rating
+
+movies_credits$weighted_rating<-weighted_rating
+movies_credits<- na.omit(movies_credits)
+#head(movies_credits)
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+df<-movies_credits
+title<-df$title
+weighted_rating<-round(df$weighted_rating, digits=2)
+df2<-data.frame(title,weighted_rating)
+```
+### Movie Ratings
+
+There are two sets of ratings in our dataset, vote_average (on a scale of 0-10) in the metadata and the rating (on a scale of 0-5) in the ratings data. In general, very high or very low vote_averages are based on small numbers of votes per movie. So we generated a new variable of weighted_rating with both vote_average and vote_count taken into consideration.
+
+In the scatter plot of Movie rating between 2002-2016, we have more ratings after 2000 and more disperse ratings before 1950 for both two types of ratings. The ratings on a scale of 0-5 have more extreme values with ratings of 0 and 5, while the weighted_rating is comparatively normally distributed and has less extreme values. So we choose to use our new variable of weighted_rating for determining whether a movie is good or not. 
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE, fig.height=3}
+ggplot( movies_credits, aes(x=year)) +
+  geom_point(aes(y=vote_average),shape=18,size=1,color="#69b3a2")+
+  geom_point(aes(y=weighted_rating),size=1,color="#FF9999")+
+  labs(y= "Rating" ,x="Year",title = "Movie Rating Between 2002-2016 ")+
+  theme(axis.text.y = element_text( angle=45), axis.text.x= element_text( angle=90))+
+  scale_y_continuous(sec.axis = sec_axis(~./20, name = "Average Rating"))
+```
+From the histogram below, we could get an overview of the distribution of the weighted ratings. The most frequent ratings in the dataset are between 5 and 6. We choose a separate point of 6 or more for "good" movies, which include roughly 22.19% of all movies in the dataset.
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+#Calculate % of movies weighted_rating greater than 6
+#length(which(movies_credits$weighted_rating>=6))/length(movies_credits$weighted_rating)
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE, fig.height=3}
+#weighted rating
+movies_credits %>%
+        ggplot(aes(x=weighted_rating)) +
+        geom_histogram(fill="#69b3a2",col="#0072B2", bins = 30) +
+        labs(x="Weighted Rating", y="Number of Movies")
+```
+
+We found that the top 10 highly rated movies vary in different aspects (see table below). Some are well-known great movies like *The Shawshank Redemption* and *The Godfather*. There are award-winning Bollywood romantic movie and BBC documentary, as well as Japanese animated fantasy films. This makes our analysis more interesting for production companies to understand the potential contribution factors of a highly rated 'good' movie. 
+
+```{r,echo=FALSE,warning=FALSE}
+top_10 = df2[order(df2$weighted_rating, decreasing= T),]
+top_10 = top_10[1:10,]
+top_10
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+mean_wr<-mean(df2$weighted_rating)
+#mean_wr
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+#quantile(movies_credits$weighted_rating, probs = c(.25, .5, .75))
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+#top revenue & rating by year by weighted rating 
+top_rev<-
+movies_credits %>%
+group_by(year) %>%
+summarise(count= n(),max_revenue = max(revenue),
+          avg_revenue =mean(revenue),vote=mean(weighted_rating))%>%
+arrange(desc(vote))%>%
+slice(1:25)
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+movies_credits$id <- as.character(movies_credits$id)
+cast_data_plus <- 
+  left_join(cast_data, 
+            movies_credits %>% select(id, title, budget, revenue, vote_count, vote_average, year, weighted_rating),
+            by=c("movie_id" = "id"))
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+#Adding frequency of actors/actress in movies, and filtering presence of 'top cast' with more than 10 movies -- then create dummy variables
+cast_data_plus <- merge(cast_data_plus, data.frame(table(cast_name = cast_data_plus$cast_name)), by = c("cast_name"))
+```
+
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+cast_data_plus$Top_cast<-ifelse(cast_data_plus$Freq>10,1,0)
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+crew_data_directors_plus <- 
+  left_join(crew_data_directors, 
+            movies_credits %>% select(id, title, budget, revenue, vote_count, vote_average, year, weighted_rating),
+            by=c("movie_id" = "id"))
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+#Do the same thing for directors, defining 'top_director' as directors with more than 5 movie productions
+crew_data_directors_plus <- merge(crew_data_directors_plus, data.frame(table(crew_name = crew_data_directors_plus$crew_name)), by = c("crew_name"))
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+crew_data_directors_plus$Top_director<-ifelse(crew_data_directors_plus$Freq>5,1,0)
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+#Droping unwanted columns
+#cast_data_plus <- subset(cast_data_plus, select = -c(Freq.x, Freq.y))
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+cast_data_plus <- subset(cast_data_plus, select = -c(gender))
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+the_final_data = cast_data_plus %>% inner_join(crew_data_directors_plus,by="movie_id")
+the_final_data <- subset(the_final_data, select = -c(2:3, 9:10,13,16:17,19:28))
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+the_final_data <- rename(the_final_data,movie_title = title.x)
+the_final_data <- rename(the_final_data,budget = budget.x)
+the_final_data <- rename(the_final_data,revenue = revenue.x)
+the_final_data <- rename(the_final_data,year = year.x)
+the_final_data <- rename(the_final_data,weighted_rating = weighted_rating.x)
+the_final_data <- rename(the_final_data,director_gender = gender)
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+the_final_data$goodMovie<-ifelse(the_final_data$weighted_rating>=6,1,0)
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+the_final_data<- na.omit(the_final_data)
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+#mean(the_final_data$Top_cast)
+#summary(the_final_data)
+```
+
+### The Logistic Regression Model
+
+In the final logistic regression model, we included budget, revenue, presence of top cast (who appears in more than 10 movies), presence of top director (who produced more than 5 movies) and the director's gender to make the prediction. 
+
+In our final dataset, the percentage of good movies is 24.08%. To understand the accuracy of the model, we produced a classification matrix as showing below to compare the predicted and actual values. Based on the matrix, the prediction accuracy is at 77.35%. We are quite confident about model performance. 
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+#an intercept only model
+logReg1 = glm(goodMovie~1,the_final_data,family=binomial)
+#int     = coef(logReg1)[1]
+#exp(int)/(1+exp(int))
+#mean(the_final_data$goodMovie==1)
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+logReg2 = glm(goodMovie ~ budget + revenue + Top_cast + Top_director + director_gender,the_final_data,family=binomial)
+#summary(logReg2)
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+logReg3 = glm(goodMovie ~ budget + revenue + Top_cast + Top_director,the_final_data,family=binomial)
+#summary(logReg3)
+```
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+logReg4 = glm(goodMovie ~ budget + Top_cast + Top_director,the_final_data,family=binomial)
+#summary(logReg4)
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+#AIC for logReg2 is lower than logReg3 and logReg4, consider logReg2 as our final model
+logRegFin = logReg2
+
+#Psuedo R-squared
+#1 - logRegFin$deviance/logRegFin$null.deviance
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+#Predictive accuracy
+pred = predict(logRegFin,type="response") #This is the probability that the score is a "good score"
+pred[pred>=.5] = "goodMovie"
+pred[pred!="goodMovie"] = "badMovie"
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+#classification matrix
+classMatrix = table(pred,the_final_data$goodMovie) #first variable is by row, the second is by column
+classMatrix
+```
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+#sum(diag(classMatrix))/sum(classMatrix)
+```
+The coefficient table of the model is shown below. Based on an intercept of -1.73 we could calculate the probability of good movie on the 'baseline' situation when budget and revenue are 0, and no presence of top cast and top director, and the gender of director is unknown is 15.07%. The coefficient table also indicates that the variables in the model had significant impacts on predicting a good movie. As we looked further into each of these variables, specific conditions were not as impactful as others. Budget and revenue are both significant, but the coefficient is 0, which indicates that both budget and revenue of the movie do not contribute much to the movie rating. Top_cast, top_director along with director’s gender are all positively contributing to the prediction of a good movie. 
+
+To quantify the effect of these factors, we calculated probability based on different conditions. When holding other factors same as the ‘baseline’ situation, presence of top director will increase the probability of good movies to 21.27%. While the presence of top cast will increase the probability to 18.04% only. Comparing to the situation when director’s gender is unknown, knowing the gender of the director will increase the probability of good movies to around 18% as well. While the probability is slightly higher for male directors than female directors. We then further assume a scenario that a production company is investing 5 million dollars in producing a movie with a top male director and top cast and expecting a revenue of 10 million. The probability of this movie to be good is 32.07% based on our model. The probability under this scenario is doubled compared to the 'baseline' situation.
+
+Due the non-linear nature of logistic models, when we covert coefficients to probabilities, generally we should consider that the impact on the probability should depends on where the change occurred. However, in our case, the most impactful variables (i.e. presence of top casts and top directors) are binary. We only consider the change between 0 and 1. 
+ 
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+matrix_coef <- summary(logRegFin)$coefficients
+round(matrix_coef, 2)
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+#intercept at -1.73. Assume for the moment that this was the only predictor in the model. This means the probability of a good movie when all other variables set to 0, is 15.07%
+regdf0 = data.frame(budget=0,revenue=0,Top_cast=0,Top_director=0, director_gender='0')
+#predict(logRegFin,regdf0, type='response')
+```
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+#presence of top cast
+regdf1 = data.frame(budget=0,revenue=0,Top_cast=1,Top_director=0, director_gender='0')
+#predict(logRegFin,regdf1, type='response')
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+#presence of top director
+regdf2 = data.frame(budget=0,revenue=0,Top_cast=0,Top_director=1, director_gender='0')
+#predict(logRegFin,regdf2, type='response')
+```
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+#female director
+regdf3 = data.frame(budget=0,revenue=0,Top_cast=0,Top_director=0, director_gender='1')
+#predict(logRegFin,regdf3, type='response')
+```
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+#female director
+regdf4 = data.frame(budget=0,revenue=0,Top_cast=0,Top_director=0, director_gender='2')
+#predict(logRegFin,regdf4, type='response')
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+#mean(the_final_data$budget)
+#median(the_final_data$budget)
+```
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+#assume a senario
+regdf5 = data.frame(budget=5000000,revenue=10000000,Top_cast=1,Top_director=1, director_gender='2')
+#predict(logRegFin,regdf5, type='response')
+```
+
+From our results, we suggest movie production companies to focus more on the selection of casts and directors when producing a movie to make it more likely to be rated well. It might be explained by the fact that top directors are more experienced in the production, and they tend to be more aware of the characteristics of a good movie. While top casts may act better than the other casts, and potentially bring a superstar effect to viewer's perception of the movie. 
+
+### Conclusion and Limitations
+
+Our analysis on prediction of good movies has given production companies a few factors to consider when they decide to produce a highly rated movie. Based on our analysis, we suggest that top casts and top directors will contribute the most to a good movie. Although our model suggests that budget and revenue only have minimal effect in predicting a good movie. They should also be considered by the movie production companies. This is because that for many situations, budget of the movie is correlated to the presence of top directors and top casts. It could be explained by the fact that for most commercial movies, top directors and top casts cost more money to hire. These factors should be considered simultaneously in practice since the actual situation tends to be more complicated.
+
+Apart from the factors mentioned above, we should also consider the possibility of endogeneity. In our case, there might be a potential omitted variable bias. For example, good movie script might be correlated to both the movie rating and independent variables such as budget, revenue, and presence of top director. There is no evidence showing this bias is present in our analysis, but production companies should take it into consideration when using the model results to make decisions. 
+
